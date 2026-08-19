@@ -21,6 +21,9 @@ COMO USAR
     python lancar_notas_jb.py --lancar       (executa de verdade)
     python lancar_notas_jb.py --ancoras      (ajuda a capturar as imagens ancora)
 
+    Retomar um lote interrompido (a NF informada TAMBEM e lancada):
+    python lancar_notas_jb.py --lancar --a-partir-de 14928
+
 PARADA DE EMERGENCIA
     Jogue o mouse para o canto superior esquerdo da tela a qualquer momento.
 ================================================================================
@@ -71,9 +74,15 @@ PACOTE_CONFIG_MES = "3000"
 
 # --- Ritmo da digitacao -------------------------------------------------------
 # Aumente se o JB estiver lento ou a rede pesada. Comece folgado.
-PAUSA_TECLA = 0.12       # entre cada tecla/enter
-PAUSA_CAMPO = 0.35       # depois de preencher um campo
-PAUSA_TELA = 1.50        # esperando uma tela nova abrir
+PAUSA_TECLA = 0.20       # entre cada tecla/enter
+PAUSA_CAMPO = 0.50       # depois de preencher um campo
+PAUSA_TELA = 2.50        # esperando uma tela nova abrir
+
+# Depois de fechar uma janela com Esc, o JB leva um tempo extra para
+# devolver o foco ao campo de tras. Digitar antes disso faz o texto se
+# perder no vazio - foi o que aconteceu com o pacote 3103 sendo digitado
+# logo apos o Esc da configuracao de mes, deixando o campo Pacote vazio.
+PAUSA_POS_ESC = 1.50
 TIMEOUT_TELA = 20.0      # desiste de esperar uma tela depois disso (segundos)
 
 # Telas internas (janelas filhas) so podem ser verificadas por imagem, que e
@@ -116,6 +125,11 @@ TITULO_PRINCIPAL = "de aplicacoes da JB Software"
 # Codigo Produto, Unidade de Medida etc). Nao e uma tela que o script pede
 # para abrir - e um sinal de que a navegacao anterior "sobrou" um Enter.
 TITULO_PESQUISA_CFOP = "Pesquisa de CFOP"
+
+# Tela que o JB abre sozinho em algumas empresas (as que tem retencao),
+# depois da aba de tributacao e antes das duplicatas. Nao ha nada a
+# preencher nela pelo processo atual - basta fechar com Esc.
+TITULO_RETENCOES = "Lancamentos de Retencoes"
 
 # Janelas que nao servem como alvo de foco (splash, avisos de carregamento)
 TITULOS_IGNORADOS = ("splash",)
@@ -533,6 +547,13 @@ class Verificador:
                 "codigo de produto), o script pode nao detectar e fechar "
                 "sozinho. Capture com: python lancar_notas_jb.py --ancoras")
 
+        if "retencoes" not in self.ancoras:
+            log.aviso(
+                "Ancora 'retencoes' nao capturada - se a tela 'Lancamentos "
+                "de Retencoes' abrir sozinha (empresas com retencao), o "
+                "script pode nao detectar e fechar sozinho. Capture com: "
+                "python lancar_notas_jb.py --ancoras")
+
     # ------------------------------------------------------------------
     def titulo_ativo(self):
         try:
@@ -820,51 +841,91 @@ def configurar_mes_da_empresa(nota, ver, dig, log):
     # o pacote de verdade da nota.
     ver.esperar_tela(etapa, fragmento_titulo=TITULO_PRINCIPAL,
                      ancora="campo_pacote")
+
+    # Esse esperar_tela acima passa na hora pelo TITULO da janela principal,
+    # que continua o mesmo o tempo todo - ou seja, ele NAO garante que o
+    # foco ja voltou para o campo Pacote. Sem essa folga, o pacote da nota
+    # e digitado cedo demais e se perde (campo Pacote fica vazio e a tela
+    # de digitacao nunca abre).
+    time.sleep(PAUSA_POS_ESC)
+
     log.info(f"      Mes contabil configurado ate {data_fim_mes}")
 
 
-def _pesquisa_cfop_visivel(ver):
+def _janela_extra_visivel(ver, ancora, titulo):
     """
-    A janela "Pesquisa de CFOP's" costuma ser uma janela FILHA (abre dentro
-    da principal do JB), entao o titulo do Windows pode nao mudar - assim
-    como Digitacao de servicos e Duplicatas, a deteccao confiavel e pela
-    ancora. Checa tambem por titulo, caso ela abra como janela independente
-    em algum outro layout.
+    Essas telas costumam ser janelas FILHAS (abrem dentro da principal do
+    JB), entao o titulo do Windows pode nao mudar - assim como Digitacao de
+    servicos e Duplicatas, a deteccao confiavel e pela ancora. Checa tambem
+    por titulo, caso a janela abra independente em algum outro layout.
     """
-    if ver.procurar_ancora("pesquisa_cfop") is True:
+    if ver.procurar_ancora(ancora) is True:
         return True
-    return sem_acento(TITULO_PESQUISA_CFOP) in sem_acento(ver.titulo_ativo())
+    return sem_acento(titulo) in sem_acento(ver.titulo_ativo())
+
+
+def fechar_janela_extra_se_abriu(ver, dig, log, etapa, rotulo, ancora,
+                                 titulo, explicacao=""):
+    """
+    Algumas telas do JB abrem sozinhas no meio do lancamento, sem o script
+    pedir. Em todas basta um Esc, mas se o script seguir digitando por cima
+    sem perceber, os campos seguintes caem dentro da janela errada e
+    bagunçam a nota inteira.
+
+    Fecha com Esc e confirma que sumiu. Se o Esc nao resolver, para o lote -
+    seguir digitando nesse estado e mais arriscado que parar e conferir.
+
+    Devolve True se a janela estava aberta e foi fechada.
+    """
+    if not _janela_extra_visivel(ver, ancora, titulo):
+        return False
+
+    log.aviso(f"A janela '{rotulo}' abriu sozinha"
+              + (f" ({explicacao})" if explicacao else "")
+              + ". Fechando com Esc...")
+    dig.tecla("escape", f"fechar '{rotulo}' aberta sem querer")
+    time.sleep(PAUSA_TELA)
+
+    if _janela_extra_visivel(ver, ancora, titulo):
+        raise ParadaSeguranca(
+            f"Etapa: {etapa}\n"
+            f"  A janela '{rotulo}' abriu sem querer e o Esc nao conseguiu "
+            f"fecha-la.\n"
+            f"  Feche manualmente e confira se os campos ja digitados desta "
+            f"nota ficaram corretos antes de rodar de novo.")
+
+    # Folga para o JB devolver o foco ao campo de tras antes da proxima
+    # digitacao - sem ela o texto seguinte pode se perder no vazio.
+    time.sleep(PAUSA_POS_ESC)
+
+    log.info(f"      '{rotulo}' fechada, seguindo normalmente.")
+    return True
 
 
 def fechar_pesquisa_cfop_se_abriu(ver, dig, log, etapa):
     """
     O campo CFOP e um campo de lookup: se ele receber um Enter estando
-    vazio, o proprio JB abre sozinho a janela "Pesquisa de CFOP's" por
-    cima da tela. Se isso acontecer e o script continuar digitando por
-    cima sem perceber, cada campo seguinte (sufixo, atividade...) cai
-    dentro dessa janela errada e bagunça tudo.
-
-    Fecha a janela com Esc e confirma que voltou. Se o Esc nao resolver,
-    para o lote - digitar as pressas nesse estado e mais arriscado que
-    parar e o usuario conferir na mao.
+    vazio, o proprio JB abre sozinho a "Pesquisa de CFOP's". Isso acontece
+    nas empresas que exigem codigo de produto, onde o 5o enter da navegacao
+    sobra.
     """
-    if not _pesquisa_cfop_visivel(ver):
-        return
+    return fechar_janela_extra_se_abriu(
+        ver, dig, log, etapa, "Pesquisa de CFOP's", "pesquisa_cfop",
+        TITULO_PESQUISA_CFOP,
+        "o campo CFOP recebeu um Enter vazio")
 
-    log.aviso("A janela 'Pesquisa de CFOP's' abriu sozinha (o campo CFOP "
-              "recebeu um Enter vazio). Fechando com Esc...")
-    dig.tecla("escape", "fechar Pesquisa de CFOP's aberta sem querer")
-    time.sleep(PAUSA_TELA)
 
-    if _pesquisa_cfop_visivel(ver):
-        raise ParadaSeguranca(
-            f"Etapa: {etapa}\n"
-            f"  A janela 'Pesquisa de CFOP's' abriu sem querer e o Esc nao "
-            f"conseguiu fecha-la.\n"
-            f"  Feche manualmente e confira se os campos ja digitados desta "
-            f"nota ficaram corretos antes de rodar de novo.")
-
-    log.info("      Pesquisa de CFOP's fechada, seguindo normalmente.")
+def fechar_retencoes_se_abriu(ver, dig, log, etapa):
+    """
+    Em algumas empresas o JB abre a tela "Lancamentos de Retencoes" depois
+    da aba de tributacao, antes das duplicatas. Nao ha nada a preencher
+    nela pelo processo atual - basta fechar com Esc e a tela de duplicatas
+    aparece na sequencia.
+    """
+    return fechar_janela_extra_se_abriu(
+        ver, dig, log, etapa, "Lancamentos de Retencoes", "retencoes",
+        TITULO_RETENCOES,
+        "empresa com retencao")
 
 
 def lancar_uma_nota(nota, vencimento, ver, dig, log):
@@ -959,6 +1020,12 @@ def lancar_uma_nota(nota, vencimento, ver, dig, log):
     dig.enter(6, "abrir a tela de duplicatas")
     time.sleep(PAUSA_TELA)
 
+    # Em algumas empresas o JB abre "Lancamentos de Retencoes" aqui, antes
+    # das duplicatas. Basta o Esc - a tela de duplicatas vem na sequencia.
+    etapa = f"NF {nota.numero} - tela de retencoes antes das duplicatas"
+    if fechar_retencoes_se_abriu(ver, dig, log, etapa):
+        time.sleep(PAUSA_TELA)
+
     # --- Tela 4: duplicatas ----------------------------------------------
     # Tambem e janela filha - verificacao pela ancora.
     etapa = f"NF {nota.numero} - lancamento da duplicata"
@@ -1016,7 +1083,35 @@ def sair_para_pesquisa(ver, dig, log, nota, tentativas=5):
 # ==============================================================================
 
 
-def preparar_lote(log):
+def cortar_a_partir_de(notas, numero_inicial, log):
+    """
+    Descarta as notas anteriores a 'numero_inicial', mantendo a ordem do
+    relatorio. Serve para retomar um lote que ja foi parcialmente lancado:
+    a nota informada E incluida (ela ainda precisa ser lancada).
+
+    Se o numero nao existir no relatorio, para tudo - lancar a partir do
+    lugar errado e pior que nao lancar.
+    """
+    alvo = str(numero_inicial).strip().lstrip("0")
+
+    for i, nota in enumerate(notas):
+        if nota.numero.lstrip("0") == alvo:
+            restantes = notas[i:]
+            log.aviso(
+                f"RETOMADA: comecando na NF {nota.numero} - "
+                f"{i} notas anteriores do relatorio foram ignoradas, "
+                f"{len(restantes)} seguem para conferencia.")
+            return restantes
+
+    raise ParadaSeguranca(
+        f"A NF {numero_inicial} nao existe no relatorio.\n"
+        f"  Confira o numero - ele precisa ser igual ao que aparece na "
+        f"coluna de numero do PDF.\n"
+        f"  O relatorio vai da NF {notas[0].numero} ate a "
+        f"NF {notas[-1].numero}.")
+
+
+def preparar_lote(log, numero_inicial=None):
     """Le PDF + planilha, casa as empresas e separa o que da para lancar."""
     log.titulo("LEITURA DOS ARQUIVOS")
     log.info(f"Relatorio: {ARQ_RELATORIO}")
@@ -1024,6 +1119,11 @@ def preparar_lote(log):
 
     notas = ler_relatorio(ARQ_RELATORIO, log)
     indice = ler_planilha(ARQ_PLANILHA, log)
+
+    # O corte vem ANTES da conferencia, para que as pendencias registradas
+    # no log e no CSV falem so das notas que este lote realmente cobre.
+    if numero_inicial:
+        notas = cortar_a_partir_de(notas, numero_inicial, log)
 
     log.titulo("CONFERENCIA DAS EMPRESAS")
     prontas = []
@@ -1042,7 +1142,9 @@ def preparar_lote(log):
     log.info("")
     log.info(f"Prontas para lancar : {len(prontas)}")
     log.info(f"Pendencias          : {len(log.pendencias)}")
-    log.info(f"Total no relatorio  : {len(notas)}")
+    rotulo_total = ("Total considerado   " if numero_inicial
+                    else "Total no relatorio  ")
+    log.info(f"{rotulo_total}: {len(notas)}")
     return notas, prontas
 
 
@@ -1092,8 +1194,8 @@ def pedir_vencimento():
 # ==============================================================================
 
 
-def modo_conferir(log):
-    notas, prontas = preparar_lote(log)
+def modo_conferir(log, numero_inicial=None):
+    notas, prontas = preparar_lote(log, numero_inicial=numero_inicial)
     mostrar_plano(prontas, "(nao informado no modo conferencia)", log)
 
     caminho = log.gravar_pendencias()
@@ -1159,8 +1261,9 @@ def focar_janela_jb(ver, log, tempo_maximo=15):
         "clique nela, e rode de novo.")
 
 
-def modo_lancar(log, limite=None, devagar=False, passo_a_passo=False):
-    notas, prontas = preparar_lote(log)
+def modo_lancar(log, limite=None, devagar=False, passo_a_passo=False,
+                numero_inicial=None):
+    notas, prontas = preparar_lote(log, numero_inicial=numero_inicial)
 
     if not prontas:
         log.erro("Nenhuma nota apta a lancar. Nada a fazer.")
@@ -1323,6 +1426,9 @@ def modo_ancoras(log):
                           "(acontece em empresas que exigem codigo de "
                           "produto) - recorte o titulo ou algo caracteristico "
                           "dela, como o botao 'Pesquisar' ou 'Sair'"),
+        ("retencoes", "tela 'Lancamentos de Retencoes' que abre sozinha em "
+                      "algumas empresas, depois da tributacao e antes das "
+                      "duplicatas - recorte o titulo dela"),
     ]
 
     print("""
@@ -1370,6 +1476,10 @@ def main():
                        dest="testar_ancoras",
                        help="testa as ancoras e lista as janelas abertas "
                             "(diagnostico, nao digita nada)")
+    parser.add_argument("--a-partir-de", metavar="NF", dest="a_partir_de",
+                        help="comeca da NF informada, ignorando as anteriores "
+                             "do relatorio (para retomar um lote interrompido "
+                             "- a NF informada TAMBEM e lancada)")
     parser.add_argument("--limite", type=int, metavar="N",
                         help="lanca apenas as N primeiras notas (use --limite 1 "
                              "no primeiro teste)")
@@ -1385,10 +1495,11 @@ def main():
     log = Log(PASTA_LOGS)
     try:
         if args.conferir:
-            modo_conferir(log)
+            modo_conferir(log, numero_inicial=args.a_partir_de)
         elif args.lancar:
             modo_lancar(log, limite=args.limite, devagar=args.devagar,
-                        passo_a_passo=args.passo_a_passo)
+                        passo_a_passo=args.passo_a_passo,
+                        numero_inicial=args.a_partir_de)
         elif args.ancoras:
             modo_ancoras(log)
         elif args.testar_ancoras:
